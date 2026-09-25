@@ -14,7 +14,7 @@ create policy "read recent reports" on public.reports for select using (created_
 create policy "add a report" on public.reports for insert with check (created_at > now() - interval '1 minute');
 
 -- Anti-spam: at most 3 reports per phone every 5 minutes, and 30 per day.
-create or replace function public.limit_reports() returns trigger language plpgsql as $
+create or replace function public.limit_reports() returns trigger language plpgsql as $fn$
 begin
   if new.device_id is null then
     raise exception 'device_id required';
@@ -24,7 +24,7 @@ begin
     raise exception 'too many reports, try again later';
   end if;
   return new;
-end $;
+end $fn$;
 drop trigger if exists reports_rate_limit on public.reports;
 create trigger reports_rate_limit before insert on public.reports for each row execute function public.limit_reports();
 create index if not exists reports_device_time on public.reports (device_id, created_at desc);
