@@ -54,6 +54,23 @@ export function slotsForArea(doc, area) {
 
 export const sameDay = (a, b) => a.toDateString() === b.toDateString();
 
+// Planned shutdowns announced in the news (collected by alo-data), newest first by date.
+export const plannedKey = (p) => `${p.date}|${p.start}|${p.url}`;
+export function plannedList(doc, areas) {
+  if (!doc || !doc.planned) return [];
+  const now = Date.now();
+  return doc.planned
+    .map((p) => ({
+      ...p,
+      key: plannedKey(p),
+      startAt: new Date(`${p.date}T${p.start}:00+06:00`),
+      endAt: new Date(`${p.date}T${p.end === '24:00' ? '23:59' : p.end}:00+06:00`),
+      mine: areas.some((a) => [a.bn, a.en, ...(a.alt || [])].some((n) => n && norm(p.places + p.title).includes(norm(n)))),
+    }))
+    .filter((p) => !isNaN(p.startAt) && p.endAt.getTime() > now)
+    .sort((a, b) => (b.mine - a.mine) || (a.startAt - b.startAt));
+}
+
 // ---------------------------------------------------------------- crowd reports
 const hasServer = () => !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 const sbHeaders = () => ({ apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' });
@@ -176,13 +193,24 @@ function dateTrigger(date) {
 }
 
 // Re-plan every reminder for the next 3 days across all saved places.
-export async function planReminders({ doc, areas, leadMin, enabled, fmt, areaName }) {
+export async function planReminders({ doc, areas, leadMin, enabled, fmt, areaName, picked = [] }) {
   try {
     await Notifications.cancelAllScheduledNotificationsAsync();
     if (!enabled || !doc) return 0;
     const limit = Date.now() + 3 * 86400000;
     let count = 0;
     const seen = new Set();
+    // planned shutdowns the person tapped "Remind me" on
+    for (const p of plannedList(doc, [])) {
+      if (!picked.includes(p.key)) continue;
+      const fireAt = new Date(p.startAt.getTime() - leadMin * 60000);
+      if (fireAt.getTime() <= Date.now()) continue;
+      await Notifications.scheduleNotificationAsync({
+        content: { title: fmt.t.nTitle(fmt.lead(leadMin)), body: `${fmt.time(p.startAt)} – ${fmt.time(p.endAt)}. ${p.title}` },
+        trigger: dateTrigger(fireAt),
+      });
+      count++;
+    }
     for (const area of areas) {
       for (const s of slotsForArea(doc, area)) {
         const fireAt = new Date(s.startAt.getTime() - leadMin * 60000);
