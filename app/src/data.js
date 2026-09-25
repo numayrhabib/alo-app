@@ -67,28 +67,49 @@ export async function deviceId() {
   return id;
 }
 
-// Returns { out, back, total, latest: 'out'|'back'|null }
+// Anti-spam: each phone gets one vote per area (its latest report), and at most
+// REPORT_LIMIT reports every REPORT_LIMIT_MIN minutes. The server enforces the same limit.
+export const REPORT_LIMIT = 3;
+export const REPORT_LIMIT_MIN = 5;
+
+// Returns { out, back, total, latest: 'out'|'back'|null } counted as distinct phones.
 export async function fetchReports(areaId) {
   const since = new Date(Date.now() - REPORT_WINDOW_MIN * 60000);
   let rows = [];
   if (hasServer()) {
     try {
-      const q = `${SUPABASE_URL}/rest/v1/reports?select=status,created_at&area_id=eq.${areaId}&created_at=gte.${since.toISOString()}&order=created_at.desc&limit=200`;
+      const q = `${SUPABASE_URL}/rest/v1/reports?select=status,created_at,device_id&area_id=eq.${areaId}&created_at=gte.${since.toISOString()}&order=created_at.desc&limit=500`;
       const r = await fetch(q, { headers: sbHeaders() });
       if (r.ok) rows = await r.json();
     } catch (e) {}
   } else {
     const mine = await loadJSON('alo.myReports', []);
-    rows = mine.filter((x) => x.area_id === areaId && new Date(x.created_at) >= since).reverse();
+    rows = mine.filter((x) => x.area_id === areaId && new Date(x.created_at) >= since).reverse()
+      .map((x) => ({ ...x, device_id: 'me' }));
   }
+  // rows are newest first: keep only each phone's latest report
+  const seenDev = new Set();
+  rows = rows.filter((x) => {
+    const d = x.device_id || Math.random();
+    if (seenDev.has(d)) return false;
+    seenDev.add(d);
+    return true;
+  });
   const out = rows.filter((x) => x.status === 'out').length;
   const back = rows.length - out;
   return { out, back, total: rows.length, latest: rows[0] ? rows[0].status : null };
 }
 
+// Returns { ok: true } or { ok: false, waitMin } when the phone has reported too often.
 export async function sendReport(areaId, status) {
   const row = { area_id: areaId, status, created_at: new Date().toISOString() };
   const mine = await loadJSON('alo.myReports', []);
+  const windowStart = Date.now() - REPORT_LIMIT_MIN * 60000;
+  const recent = mine.filter((x) => new Date(x.created_at).getTime() >= windowStart);
+  if (recent.length >= REPORT_LIMIT) {
+    const oldest = new Date(recent[recent.length - REPORT_LIMIT].created_at).getTime();
+    return { ok: false, waitMin: Math.max(1, Math.ceil((oldest + REPORT_LIMIT_MIN * 60000 - Date.now()) / 60000)) };
+  }
   mine.push(row);
   await saveJSON('alo.myReports', mine.slice(-500));
   if (hasServer()) {
@@ -99,6 +120,7 @@ export async function sendReport(areaId, status) {
       });
     } catch (e) {}
   }
+  return { ok: true };
 }
 
 // Hours without power per day for the last 7 days, from this phone's own reports.
