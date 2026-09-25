@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Alo",
+    "slug": "alo",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "android": {
+      "package": "com.aloapp.bd",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#E89A0C"
+      },
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      ["expo-splash-screen", { "image": "./assets/splash-icon.png", "imageWidth": 160, "resizeMode": "contain", "backgroundColor": "#E89A0C" }],
+      ["expo-location", { "locationWhenInUsePermission": "Alo uses your location to show load shedding status for the area you are in." }],
+      ["expo-notifications", { "color": "#E89A0C" }],
+      ["react-native-google-mobile-ads", { "androidAppId": "ca-app-pub-3940256099942544~3347511713", "iosAppId": "ca-app-pub-3940256099942544~1458002511" }]
+    ]
+  }
+}
