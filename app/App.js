@@ -15,14 +15,17 @@ import { LIGHT, DARK } from './src/theme';
 import { BottomBanner, InlineBanner, startAds } from './src/ads';
 import {
   askNotificationPermission, fetchReports, fetchSchedule, loadJSON, myWeek, planReminders, saveJSON,
-  sameDay, sendReport, sendTestReminder, setupNotifications, slotsForArea,
+  plannedList, sameDay, sendReport, sendTestReminder, setupNotifications, slotsForArea,
 } from './src/data';
+
+const CONFIRM_PHONES = 3; // an area counts as "out" only when this many different phones agree
 
 const LEADS = [15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480, 600, 720];
 const DEFAULTS = {
   lang: 'bn', theme: 'system', areaId: 'mirpur10', gps: false, auto: true, reminders: true, leadMin: 60,
   saved: [{ label: 'homeL', id: 'mirpur10' }, { label: 'officeL', id: 'gulshan' }, { label: 'parentsL', id: 'dhanmondi' }],
   ips: { bat: 12, ah: 150, fan: 2, light: 4, router: 1, tv: 0 },
+  picked: [],
 };
 
 export default function App() {
@@ -45,6 +48,8 @@ function Main() {
   const [myReport, setMyReport] = useState(null);
   const [detecting, setDetecting] = useState(false);
   const [picker, setPicker] = useState(null); // null | 'main' | index of saved place
+  const [askWho, setAskWho] = useState(false); // "just my home or whole area?" sheet
+  const [justMe, setJustMe] = useState(false);
   const [toast, setToast] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(new Date());
@@ -118,8 +123,8 @@ function Main() {
   useEffect(() => {
     if (!ready) return;
     const places = [area, ...st.saved.map((p) => areaById(p.id))];
-    planReminders({ doc, areas: places, leadMin: st.leadMin, enabled: st.reminders, fmt, areaName });
-  }, [ready, doc, st.areaId, st.saved, st.leadMin, st.reminders, st.lang]);
+    planReminders({ doc, areas: places, leadMin: st.leadMin, enabled: st.reminders, fmt, areaName, picked: st.picked || [] });
+  }, [ready, doc, st.areaId, st.saved, st.leadMin, st.reminders, st.lang, st.picked]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -130,8 +135,9 @@ function Main() {
     setRefreshing(false);
   };
 
-  const report = async (status) => {
+  const report = async (status, confirmed) => {
     if (myReport === status) return;
+    if (status === 'out' && !confirmed) { setAskWho(true); return; }
     const res = await sendReport(st.areaId, status);
     if (!res.ok) { showToast(t.tooMany(fmt.lead(res.waitMin))); return; }
     setMyReport(status);
@@ -146,8 +152,17 @@ function Main() {
   const liveSlot = slots.find((s) => s.startAt <= now && s.endAt > now);
   const nextSlot = slots.find((s) => s.startAt > now);
 
+  const places = [area, ...st.saved.map((p) => areaById(p.id))];
+  const planned = useMemo(() => plannedList(doc, places), [doc, st.areaId, st.saved]);
+  const togglePick = (key) => {
+    const picked = st.picked || [];
+    update({ picked: picked.includes(key) ? picked.filter((k) => k !== key) : [...picked, key].slice(-30) });
+  };
+
   let status = 'none';
-  if (reports.total > 0) status = reports.out > reports.back || (reports.out === reports.back && reports.latest === 'out') ? 'off' : 'on';
+  const outWins = reports.out > reports.back || (reports.out === reports.back && reports.latest === 'out');
+  if (reports.total > 0 && outWins) status = reports.out >= CONFIRM_PHONES ? 'off' : 'maybe';
+  else if (reports.total > 0) status = 'on';
   else if (liveSlot) status = 'sched';
 
   const s = styles(c);
@@ -179,10 +194,11 @@ function Main() {
         {tab === 'home' && (
           <Home {...props} detecting={detecting} detect={detect} setPicker={setPicker} status={status} reports={reports}
             myReport={myReport} report={report} nextSlot={nextSlot} todaySlots={todaySlots} now={now}
-            doc={doc} offline={offline} setMyReport={setMyReport} />
+            doc={doc} offline={offline} setMyReport={setMyReport} planned={planned} togglePick={togglePick} />
         )}
         {tab === 'schedule' && (
-          <Schedule {...props} detecting={detecting} setPicker={setPicker} todaySlots={todaySlots} tomorrowSlots={tomorrowSlots} now={now} doc={doc} />
+          <Schedule {...props} detecting={detecting} setPicker={setPicker} todaySlots={todaySlots} tomorrowSlots={tomorrowSlots} now={now} doc={doc}
+            planned={planned} togglePick={togglePick} />
         )}
         {tab === 'tools' && <Tools {...props} />}
         {tab === 'settings' && <Settings {...props} detect={detect} setPicker={setPicker} showToast={showToast} />}
@@ -199,6 +215,29 @@ function Main() {
           </Pressable>
         ))}
       </View>
+
+      <Modal visible={askWho || justMe} transparent animationType="fade" onRequestClose={() => { setAskWho(false); setJustMe(false); }}>
+        <Pressable style={s.scrim} onPress={() => { setAskWho(false); setJustMe(false); }} />
+        <View style={s.sheet}>
+          <View style={s.grab} />
+          {justMe ? (
+            <>
+              <Text style={[s.h1, { fontSize: 19 }]}>{t.justMeTitle}</Text>
+              <Text style={[s.sub, { marginTop: 8 }]}>{t.justMeTip}</Text>
+              <Pressable style={s.primary} onPress={() => setJustMe(false)}><Text style={s.primaryTxt}>OK</Text></Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={[s.h1, { fontSize: 19 }]}>{t.whoQ}</Text>
+              <Text style={[s.sub, { marginTop: 6 }]}>{t.whoH}</Text>
+              <Pressable style={s.primary} onPress={() => { setAskWho(false); report('out', true); }}><Text style={s.primaryTxt}>{t.wholeArea}</Text></Pressable>
+              <Pressable style={[s.ghostSm, { marginTop: 8, alignItems: 'center', padding: 13 }]} onPress={() => { setAskWho(false); setJustMe(true); }}>
+                <Text style={{ color: c.ink, fontWeight: '700' }}>{t.justMe}</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      </Modal>
 
       <AreaPicker {...props} visible={picker !== null} onClose={() => setPicker(null)}
         onPick={(a) => {
@@ -257,12 +296,45 @@ function SlotRow({ s, c, t, fmt, slot, now, utilName }) {
   );
 }
 
+function PlannedCard({ s, c, t, fmt, st, planned, togglePick, onlyMine }) {
+  const list = (onlyMine ? planned.filter((x) => x.mine) : planned).slice(0, onlyMine ? 3 : 8);
+  if (onlyMine && !list.length) return null;
+  const today = new Date();
+  return (
+    <Card s={s}>
+      <Eyebrow s={s}>{t.planned}</Eyebrow>
+      <Text style={[s.small, { marginTop: -4, marginBottom: 6 }]}>{t.plannedH}</Text>
+      {!list.length && <Text style={s.sub}>{t.nothingPlanned}</Text>}
+      {list.map((x) => {
+        const on = (st.picked || []).includes(x.key);
+        const day = sameDay(x.startAt, today) ? t.today : sameDay(x.startAt, new Date(today.getTime() + 86400000)) ? t.tomorrow : fmt.n(x.date);
+        return (
+          <View key={x.key} style={[s.slot, { alignItems: 'flex-start' }]}>
+            <View style={{ flex: 1, gap: 3 }}>
+              <Text style={s.slotT}>{day} · {fmt.time(x.startAt)} – {fmt.time(x.endAt)}</Text>
+              {x.mine && <Text style={[s.small, { color: c.off, fontWeight: '700' }]}>{t.forYourArea}</Text>}
+              <Text style={s.sub} numberOfLines={3}>{x.places.replace(/\n/g, ' ')}</Text>
+              <Pressable onPress={() => Linking.openURL(x.url)}><Text style={[s.small, { color: c.amberInk, fontWeight: '700' }]}>{t.read} ↗</Text></Pressable>
+            </View>
+            <Pressable onPress={() => togglePick(x.key)} style={[s.pickBtn, on && { backgroundColor: c.amber, borderColor: c.amber }]}>
+              <Ionicons name={on ? 'notifications' : 'notifications-outline'} size={14} color={on ? '#fff' : c.amberInk} />
+              <Text style={{ fontSize: 12, fontWeight: '700', color: on ? '#fff' : c.amberInk }}>{on ? t.reminded : t.remindMe}</Text>
+            </Pressable>
+          </View>
+        );
+      })}
+    </Card>
+  );
+}
+
 // ------------------------------------------------------------------ Home
 function Home(p) {
   const { s, c, t, fmt, st, area, areaName, status, reports, myReport, report, nextSlot, todaySlots, now, doc, offline } = p;
-  const bg = status === 'off' || status === 'sched' ? c.offSoft : status === 'on' ? c.onSoft : c.surface2;
-  const fg = status === 'off' || status === 'sched' ? c.off : status === 'on' ? c.on : c.ink2;
-  const title = { off: t.powerOff, sched: t.powerSched, on: t.powerOn, none: t.noReports }[status];
+  const bg = status === 'off' || status === 'sched' ? c.offSoft : status === 'on' ? c.onSoft : status === 'maybe' ? c.amberSoft : c.surface2;
+  const fg = status === 'off' || status === 'sched' ? c.off : status === 'on' ? c.on : status === 'maybe' ? c.amberInk : c.ink2;
+  const title = { off: t.powerOff, sched: t.powerSched, on: t.powerOn, maybe: t.maybe, none: t.noReports }[status];
+  const subline = status === 'off' ? t.confirmedBy(reports.out) : status === 'maybe' ? t.notConfirmed(reports.out)
+    : reports.total ? t.reportsN(reports.total) : t.beFirst;
   const minsToNext = nextSlot ? (nextSlot.startAt - now) / 60000 : 0;
   return (
     <>
@@ -290,7 +362,7 @@ function Home(p) {
           <View style={[s.dot, { backgroundColor: fg }]} />
           <Text style={[s.statusTitle, { color: fg }]}>{title}</Text>
         </View>
-        <Text style={s.sub}>{reports.total ? fmt.n(t.reportsN(reports.total)) : t.beFirst}</Text>
+        <Text style={s.sub}>{fmt.n(subline)}</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
           {['out', 'back'].map((k) => (
             <Pressable key={k} onPress={() => report(k)} style={[s.rbtn, myReport === k && { borderColor: c.ink }]}>
@@ -326,6 +398,8 @@ function Home(p) {
           </Text>
         </View>
       </Card>
+
+      <PlannedCard {...p} onlyMine />
 
       <Card s={s}>
         <Eyebrow s={s}>{t.todayTimeline}</Eyebrow>
@@ -369,6 +443,7 @@ function Schedule(p) {
       {day(t.today, todaySlots)}
       <InlineBanner c={c} label={st.lang === 'bn' ? 'বিজ্ঞাপন' : 'Sponsored'} />
       {day(t.tomorrow, tomorrowSlots)}
+      <PlannedCard {...p} />
       {notices.length > 0 && (
         <Card s={s}>
           <Eyebrow s={s}>{t.notices} · {utilName(area.u)}</Eyebrow>
@@ -599,6 +674,7 @@ const styles = (c) => StyleSheet.create({
   primary: { marginTop: 12, backgroundColor: c.ink, borderRadius: 12, padding: 13, alignItems: 'center' },
   primaryTxt: { color: c.bg, fontWeight: '700' },
   ghostSm: { backgroundColor: c.surface2, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
+  pickBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: c.amber, backgroundColor: c.amberSoft, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
   tabs: { flexDirection: 'row', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.line, backgroundColor: c.surface, paddingTop: 8 },
   tabBtn: { flex: 1, alignItems: 'center', gap: 2 },
   tabTxt: { fontSize: 11, fontWeight: '600', color: c.ink3 },
