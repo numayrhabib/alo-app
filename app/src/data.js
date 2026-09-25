@@ -1,0 +1,193 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
+import { SCHEDULE_URL, SUPABASE_URL, SUPABASE_ANON_KEY, REPORT_WINDOW_MIN } from './config';
+import { toEnDigits } from './i18n';
+
+// ---------------------------------------------------------------- small storage helpers
+export async function loadJSON(key, fallback) {
+  try {
+    const v = await AsyncStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+export async function saveJSON(key, value) {
+  try { await AsyncStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+
+// ---------------------------------------------------------------- official schedule
+export async function fetchSchedule() {
+  try {
+    const r = await fetch(`${SCHEDULE_URL}?t=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const doc = await r.json();
+    await saveJSON('alo.schedule', doc);
+    return { doc, offline: false };
+  } catch (e) {
+    return { doc: await loadJSON('alo.schedule', null), offline: true };
+  }
+}
+
+const norm = (s) => toEnDigits(String(s || '')).toLowerCase().replace(/[\s.,/()-]+/g, '');
+
+function matchesArea(slot, area) {
+  if (slot.utility && area.u && slot.utility !== area.u) return false;
+  const s = norm(slot.area);
+  return [area.bn, area.en, ...(area.alt || [])].some((n) => n && s.includes(norm(n)));
+}
+
+// Slots for an area, as real Date objects (schedules are in Bangladesh time).
+export function slotsForArea(doc, area) {
+  if (!doc || !doc.slots) return [];
+  return doc.slots
+    .filter((s) => matchesArea(s, area))
+    .map((s) => ({
+      ...s,
+      startAt: new Date(`${s.date}T${s.start}:00+06:00`),
+      endAt: new Date(`${s.date}T${s.end === '24:00' ? '23:59' : s.end}:00+06:00`),
+    }))
+    .filter((s) => !isNaN(s.startAt))
+    .sort((a, b) => a.startAt - b.startAt);
+}
+
+export const sameDay = (a, b) => a.toDateString() === b.toDateString();
+
+// ---------------------------------------------------------------- crowd reports
+const hasServer = () => !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+const sbHeaders = () => ({ apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' });
+
+export async function deviceId() {
+  let id = await loadJSON('alo.device', null);
+  if (!id) {
+    id = `d_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    await saveJSON('alo.device', id);
+  }
+  return id;
+}
+
+// Returns { out, back, total, latest: 'out'|'back'|null }
+export async function fetchReports(areaId) {
+  const since = new Date(Date.now() - REPORT_WINDOW_MIN * 60000);
+  let rows = [];
+  if (hasServer()) {
+    try {
+      const q = `${SUPABASE_URL}/rest/v1/reports?select=status,created_at&area_id=eq.${areaId}&created_at=gte.${since.toISOString()}&order=created_at.desc&limit=200`;
+      const r = await fetch(q, { headers: sbHeaders() });
+      if (r.ok) rows = await r.json();
+    } catch (e) {}
+  } else {
+    const mine = await loadJSON('alo.myReports', []);
+    rows = mine.filter((x) => x.area_id === areaId && new Date(x.created_at) >= since).reverse();
+  }
+  const out = rows.filter((x) => x.status === 'out').length;
+  const back = rows.length - out;
+  return { out, back, total: rows.length, latest: rows[0] ? rows[0].status : null };
+}
+
+export async function sendReport(areaId, status) {
+  const row = { area_id: areaId, status, created_at: new Date().toISOString() };
+  const mine = await loadJSON('alo.myReports', []);
+  mine.push(row);
+  await saveJSON('alo.myReports', mine.slice(-500));
+  if (hasServer()) {
+    try {
+      await fetch(`${SUPABASE_URL}/rest/v1/reports`, {
+        method: 'POST', headers: { ...sbHeaders(), Prefer: 'return=minimal' },
+        body: JSON.stringify({ area_id: areaId, status, device_id: await deviceId() }),
+      });
+    } catch (e) {}
+  }
+}
+
+// Hours without power per day for the last 7 days, from this phone's own reports.
+export async function myWeek() {
+  const mine = await loadJSON('alo.myReports', []);
+  const days = [];
+  const now = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    days.push({ date: d, hours: 0 });
+  }
+  let outAt = null;
+  for (const r of mine) {
+    const t = new Date(r.created_at);
+    if (r.status === 'out') outAt = outAt || t;
+    else if (outAt) {
+      const hrs = Math.min(12, (t - outAt) / 3600000);
+      const day = days.find((x) => sameDay(x.date, outAt));
+      if (day && hrs > 0) day.hours += hrs;
+      outAt = null;
+    }
+  }
+  return days.map((d) => ({ ...d, hours: Math.round(d.hours * 10) / 10 }));
+}
+
+// ---------------------------------------------------------------- reminders (local notifications)
+const TT = Notifications.SchedulableTriggerInputTypes || {};
+
+export async function setupNotifications() {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true, shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false,
+    }),
+  });
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('reminders', {
+      name: 'Load shedding reminders', importance: Notifications.AndroidImportance.HIGH,
+    });
+  }
+}
+
+export async function askNotificationPermission() {
+  const cur = await Notifications.getPermissionsAsync();
+  if (cur.granted) return true;
+  const res = await Notifications.requestPermissionsAsync();
+  return !!res.granted;
+}
+
+function dateTrigger(date) {
+  return TT.DATE ? { type: TT.DATE, date, channelId: 'reminders' } : { date, channelId: 'reminders' };
+}
+
+// Re-plan every reminder for the next 3 days across all saved places.
+export async function planReminders({ doc, areas, leadMin, enabled, fmt, areaName }) {
+  try {
+    await Notifications.cancelAllScheduledNotificationsAsync();
+    if (!enabled || !doc) return 0;
+    const limit = Date.now() + 3 * 86400000;
+    let count = 0;
+    const seen = new Set();
+    for (const area of areas) {
+      for (const s of slotsForArea(doc, area)) {
+        const fireAt = new Date(s.startAt.getTime() - leadMin * 60000);
+        const key = `${area.id}|${s.startAt.getTime()}`;
+        if (fireAt.getTime() <= Date.now() || s.startAt.getTime() > limit || seen.has(key)) continue;
+        seen.add(key);
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: fmt.t.nTitle(fmt.lead(leadMin)),
+            body: fmt.t.nBody(areaName(area), `${fmt.time(s.startAt)} – ${fmt.time(s.endAt)}`),
+          },
+          trigger: dateTrigger(fireAt),
+        });
+        count++;
+      }
+    }
+    return count;
+  } catch (e) {
+    return 0;
+  }
+}
+
+export async function sendTestReminder(fmt) {
+  const trigger = TT.TIME_INTERVAL
+    ? { type: TT.TIME_INTERVAL, seconds: 3, channelId: 'reminders' }
+    : { seconds: 3, channelId: 'reminders' };
+  await Notifications.scheduleNotificationAsync({
+    content: { title: fmt.t.testTitle, body: fmt.t.testBody }, trigger,
+  });
+}
