@@ -132,8 +132,9 @@ function Main() {
 
   const report = async (status) => {
     if (myReport === status) return;
+    const res = await sendReport(st.areaId, status);
+    if (!res.ok) { showToast(t.tooMany(fmt.lead(res.waitMin))); return; }
     setMyReport(status);
-    await sendReport(st.areaId, status);
     await loadReports();
     showToast(t.thanks);
   };
