@@ -31,7 +31,7 @@ jobs:
       - name: Add Alo's libraries
         working-directory: build
         run: |
-          npx expo install expo-location expo-notifications expo-constants expo-splash-screen expo-status-bar @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context @expo/vector-icons
+          npx expo install expo-location expo-notifications expo-constants expo-splash-screen expo-status-bar @react-native-async-storage/async-storage @react-native-community/slider react-native-safe-area-context @expo/vector-icons react-native-webview
           npm install react-native-google-mobile-ads
       - name: Copy Alo's code and icons
         run: |
@@ -40,6 +40,8 @@ jobs:
           cp app/App.js app/app.json build/
           rm -rf build/src build/assets
           cp -r app/src build/src
+          rm -rf build/modules
+          cp -r app/modules build/modules
           cp -r app/assets build/assets
       - name: Generate the Android project
         working-directory: build
