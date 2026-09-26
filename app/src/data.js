@@ -90,12 +90,17 @@ export const REPORT_LIMIT = 3;
 export const REPORT_LIMIT_MIN = 5;
 
 // Returns { out, back, total, latest: 'out'|'back'|null } counted as distinct phones.
-export async function fetchReports(areaId) {
+// With a street zone ({gi, gj}) it counts phones in the 3x3 squares around it (about 450 m across);
+// otherwise the whole area.
+export async function fetchReports(areaId, zone) {
   const since = new Date(Date.now() - REPORT_WINDOW_MIN * 60000);
   let rows = [];
   if (hasServer()) {
     try {
-      const q = `${SUPABASE_URL}/rest/v1/reports?select=status,created_at,device_id&area_id=eq.${areaId}&created_at=gte.${since.toISOString()}&order=created_at.desc&limit=500`;
+      const where = zone
+        ? `gi=gte.${zone.gi - 1}&gi=lte.${zone.gi + 1}&gj=gte.${zone.gj - 1}&gj=lte.${zone.gj + 1}`
+        : `area_id=eq.${areaId}`;
+      const q = `${SUPABASE_URL}/rest/v1/reports?select=status,created_at,occurred_at,source,device_id&${where}&created_at=gte.${since.toISOString()}&order=created_at.desc&limit=500`;
       const r = await fetch(q, { headers: sbHeaders() });
       if (r.ok) rows = await r.json();
     } catch (e) {}
@@ -104,6 +109,10 @@ export async function fetchReports(areaId) {
     rows = mine.filter((x) => x.area_id === areaId && new Date(x.created_at) >= since).reverse()
       .map((x) => ({ ...x, device_id: 'me' }));
   }
+  // A sensor "out" (charger lost power) only counts if another phone nearby lost power within 3 minutes.
+  const tOf = (x) => new Date(x.occurred_at || x.created_at).getTime();
+  rows = rows.filter((x) => x.source !== 'sensor' || x.status !== 'out'
+    || rows.some((y) => y.device_id !== x.device_id && y.status === 'out' && Math.abs(tOf(y) - tOf(x)) <= 180000));
   // rows are newest first: keep only each phone's latest report
   const seenDev = new Set();
   rows = rows.filter((x) => {
@@ -118,7 +127,7 @@ export async function fetchReports(areaId) {
 }
 
 // Returns { ok: true } or { ok: false, waitMin } when the phone has reported too often.
-export async function sendReport(areaId, status) {
+export async function sendReport(areaId, status, zone) {
   const row = { area_id: areaId, status, created_at: new Date().toISOString() };
   const mine = await loadJSON('alo.myReports', []);
   const windowStart = Date.now() - REPORT_LIMIT_MIN * 60000;
@@ -133,7 +142,10 @@ export async function sendReport(areaId, status) {
     try {
       await fetch(`${SUPABASE_URL}/rest/v1/reports`, {
         method: 'POST', headers: { ...sbHeaders(), Prefer: 'return=minimal' },
-        body: JSON.stringify({ area_id: areaId, status, device_id: await deviceId() }),
+        body: JSON.stringify({
+          area_id: areaId, status, device_id: await deviceId(), source: 'manual',
+          ...(zone ? { gi: zone.gi, gj: zone.gj } : {}),
+        }),
       });
     } catch (e) {}
   }
@@ -141,7 +153,7 @@ export async function sendReport(areaId, status) {
 }
 
 // Live alerts: tell the server which areas this phone follows (push goes out when 3+ neighbours confirm).
-export async function registerPush({ areaIds, lang, enabled }) {
+export async function registerPush({ areaIds, cells = [], lang, enabled }) {
   if (!hasServer()) return false;
   try {
     const perm = await Notifications.getPermissionsAsync();
@@ -149,9 +161,13 @@ export async function registerPush({ areaIds, lang, enabled }) {
     const tok = await Notifications.getDevicePushTokenAsync();
     const token = tok && tok.data;
     if (!token || typeof token !== 'string') return false;
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/register_push`, {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/register_push_v2`, {
       method: 'POST', headers: sbHeaders(),
-      body: JSON.stringify({ p_token: token, p_areas: enabled ? [...new Set(areaIds)].slice(0, 10) : [], p_lang: lang }),
+      body: JSON.stringify({
+        p_token: token, p_lang: lang,
+        p_areas: enabled ? [...new Set(areaIds)].slice(0, 10) : [],
+        p_cells: enabled ? [...new Set(cells)].slice(0, 10) : [],
+      }),
     });
     return r.ok;
   } catch (e) {
