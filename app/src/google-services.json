@@ -1,0 +1,19 @@
+{
+  "project_info": {
+    "project_number": "760158454232",
+    "project_id": "alo-alerts",
+    "storage_bucket": "alo-alerts.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:760158454232:android:94bc8ba36546099dc7f2ad",
+        "android_client_info": { "package_name": "com.aloapp.bd" }
+      },
+      "oauth_client": [],
+      "api_key": [{ "current_key": "AIzaSyCPU-bg5lwsUm4A_Z-wezrZvNIZLjV-Re0" }],
+      "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+    }
+  ],
+  "configuration_version": "1"
+}
