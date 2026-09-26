@@ -15,7 +15,7 @@ import { LIGHT, DARK } from './src/theme';
 import { BottomBanner, InlineBanner, startAds } from './src/ads';
 import {
   askNotificationPermission, fetchReports, fetchSchedule, loadJSON, myWeek, planReminders, saveJSON,
-  plannedList, sameDay, sendReport, sendTestReminder, setupNotifications, slotsForArea,
+  plannedList, registerPush, sameDay, sendReport, sendTestReminder, setupNotifications, slotsForArea,
 } from './src/data';
 
 const CONFIRM_PHONES = 3; // an area counts as "out" only when this many different phones agree
@@ -26,6 +26,7 @@ const DEFAULTS = {
   saved: [{ label: 'homeL', id: 'mirpur10' }, { label: 'officeL', id: 'gulshan' }, { label: 'parentsL', id: 'dhanmondi' }],
   ips: { bat: 12, ah: 150, fan: 2, light: 4, router: 1, tv: 0 },
   picked: [],
+  live: true,
 };
 
 export default function App() {
@@ -125,6 +126,15 @@ function Main() {
     const places = [area, ...st.saved.map((p) => areaById(p.id))];
     planReminders({ doc, areas: places, leadMin: st.leadMin, enabled: st.reminders, fmt, areaName, picked: st.picked || [] });
   }, [ready, doc, st.areaId, st.saved, st.leadMin, st.reminders, st.lang, st.picked]);
+
+  // ---- live alerts: follow the current area + saved places
+  useEffect(() => {
+    if (!ready) return;
+    (async () => {
+      if (st.live && !(await askNotificationPermission())) return;
+      registerPush({ areaIds: [st.areaId, ...st.saved.map((p) => p.id)], lang: st.lang, enabled: st.live });
+    })();
+  }, [ready, st.areaId, st.saved, st.lang, st.live]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -560,6 +570,10 @@ function Settings(p) {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
             <Text style={s.small}>{fmt.lead(15)}</Text><Text style={s.small}>{fmt.lead(360)}</Text><Text style={s.small}>{fmt.lead(720)}</Text>
           </View>
+        </View>
+        <View style={s.setRow}>
+          <View style={{ flex: 1 }}><Text style={s.k}>{t.liveSet}</Text><Text style={s.small}>{t.liveSetH}</Text></View>
+          <Switch value={st.live !== false} onValueChange={(v) => update({ live: v })} trackColor={{ true: c.on }} />
         </View>
         <View style={s.setRow}>
           <View style={{ flex: 1 }}><Text style={s.k}>{t.autoSet}</Text><Text style={s.small}>{t.autoSetH}</Text></View>
