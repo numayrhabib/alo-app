@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, StyleSheet,
+  ActivityIndicator, Alert, FlatList, Linking, Modal, Pressable, RefreshControl, ScrollView, StyleSheet,
   Switch, Text, TextInput, useColorScheme, View,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -13,6 +13,9 @@ import { AREAS, UTIL_BN, areaById, nearestArea } from './src/areas';
 import { makeFmt } from './src/i18n';
 import { LIGHT, DARK } from './src/theme';
 import { BottomBanner, InlineBanner, startAds } from './src/ads';
+import { cellCenter, cellOf, currentSpot } from './src/zones';
+import { sensorAvailable, sensorOff, sensorSync } from './src/sensor';
+import MapPicker from './src/MapPicker';
 import {
   askNotificationPermission, fetchReports, fetchSchedule, loadJSON, myWeek, planReminders, saveJSON,
   plannedList, registerPush, sameDay, sendReport, sendTestReminder, setupNotifications, slotsForArea,
@@ -27,6 +30,9 @@ const DEFAULTS = {
   ips: { bat: 12, ah: 150, fan: 2, light: 4, router: 1, tv: 0 },
   picked: [],
   live: true,
+  here: null, // street square of the last GPS fix
+  sel: null, // index of the saved place being viewed
+  sensor: false,
 };
 
 export default function App() {
@@ -49,6 +55,8 @@ function Main() {
   const [myReport, setMyReport] = useState(null);
   const [detecting, setDetecting] = useState(false);
   const [picker, setPicker] = useState(null); // null | 'main' | index of saved place
+  const [mapFor, setMapFor] = useState(null); // index of saved place being pinned on the map
+  const [afterPin, setAfterPin] = useState(false); // turn the sensor on once Home is pinned
   const [askWho, setAskWho] = useState(false); // "just my home or whole area?" sheet
   const [justMe, setJustMe] = useState(false);
   const [toast, setToast] = useState('');
@@ -60,6 +68,8 @@ function Main() {
   const fmt = useMemo(() => makeFmt(st.lang), [st.lang]);
   const t = fmt.t;
   const area = areaById(st.areaId);
+  // street square being viewed: GPS spot, or a pinned saved place (else whole-area mode)
+  const zone = st.gps ? st.here : (st.sel != null && st.saved[st.sel] && st.saved[st.sel].cell) || null;
   const areaName = useCallback((a) => (st.lang === 'bn' ? a.bn : a.en), [st.lang]);
   const utilName = (u) => (st.lang === 'bn' ? UTIL_BN[u] || u : u);
 
@@ -101,7 +111,7 @@ function Main() {
       if (!pos) pos = await Location.getLastKnownPositionAsync();
       if (!pos) { showToast(t.locDenied); return; }
       const a = nearestArea(pos.coords.latitude, pos.coords.longitude);
-      update({ areaId: a.id, gps: true });
+      update({ areaId: a.id, gps: true, sel: null, here: cellOf(pos.coords.latitude, pos.coords.longitude) });
       setMyReport(null);
       showToast(t.youreIn(areaName(a)));
     } catch (e) {
@@ -117,7 +127,7 @@ function Main() {
   }, [ready, st.auto, detect]);
 
   // ---- live reports for the current area
-  const loadReports = useCallback(async () => setReports(await fetchReports(st.areaId)), [st.areaId]);
+  const loadReports = useCallback(async () => setReports(await fetchReports(st.areaId, zone)), [st.areaId, zone && zone.id]);
   useEffect(() => { loadReports(); const id = setInterval(loadReports, 60000); return () => clearInterval(id); }, [loadReports]);
 
   // ---- reminders follow schedule + settings
@@ -132,9 +142,42 @@ function Main() {
     if (!ready) return;
     (async () => {
       if (st.live && !(await askNotificationPermission())) return;
-      registerPush({ areaIds: [st.areaId, ...st.saved.map((p) => p.id)], lang: st.lang, enabled: st.live });
+      const cells = [st.here, ...st.saved.map((p) => p.cell)].filter(Boolean).map((x) => x.id);
+      registerPush({ areaIds: [st.areaId, ...st.saved.map((p) => p.id)], cells, lang: st.lang, enabled: st.live });
     })();
-  }, [ready, st.areaId, st.saved, st.lang, st.live]);
+  }, [ready, st.areaId, st.saved, st.lang, st.live, st.here && st.here.id]);
+
+  // ---- saved places pinned to a street square
+  const savePin = (i, lat, lng) => {
+    const a = nearestArea(lat, lng);
+    setSt((x) => ({ ...x, saved: x.saved.map((p, j) => (j === i ? { ...p, id: a.id, cell: cellOf(lat, lng) } : p)) }));
+    showToast(t.spotSaved(areaName(a)));
+  };
+  const pinHere = async (i) => {
+    const pos = await currentSpot();
+    if (!pos) { showToast(t.locDenied); return; }
+    savePin(i, pos.lat, pos.lng);
+  };
+
+  // ---- power-cut sensor (reports for the Home square while this phone charges)
+  const enableSensor = async (v) => {
+    if (!v) { sensorOff(); update({ sensor: false }); return; }
+    const go = () => { askNotificationPermission(); update({ sensor: true }); };
+    if (st.saved[0] && st.saved[0].cell) { go(); return; }
+    Alert.alert(t.homeQ, t.homeQH, [
+      { text: t.cancel, style: 'cancel' },
+      { text: t.pickMap, onPress: () => { setAfterPin(true); setMapFor(0); } },
+      { text: t.atHome, onPress: async () => {
+        const pos = await currentSpot();
+        if (!pos) { showToast(t.locDenied); return; }
+        savePin(0, pos.lat, pos.lng);
+        go();
+      } },
+    ]);
+  };
+  useEffect(() => {
+    if (ready && st.sensor && st.saved[0] && st.saved[0].cell) sensorSync({ home: st.saved[0], lang: st.lang });
+  }, [ready, st.sensor, st.saved, st.lang]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -148,7 +191,7 @@ function Main() {
   const report = async (status, confirmed) => {
     if (myReport === status) return;
     if (status === 'out' && !confirmed) { setAskWho(true); return; }
-    const res = await sendReport(st.areaId, status);
+    const res = await sendReport(st.areaId, status, zone);
     if (!res.ok) { showToast(t.tooMany(fmt.lead(res.waitMin))); return; }
     setMyReport(status);
     await loadReports();
@@ -176,7 +219,10 @@ function Main() {
   else if (liveSlot) status = 'sched';
 
   const s = styles(c);
-  const props = { c, s, t, fmt, st, update, area, areaName, utilName };
+  const props = { c, s, t, fmt, st, update, area, areaName, utilName, zone, enableSensor, pinHere, setMapFor };
+  const mapPlace = mapFor !== null ? st.saved[mapFor] : null;
+  const mapStart = !mapPlace ? null : mapPlace.cell ? cellCenter(mapPlace.cell)
+    : { lat: areaById(mapPlace.id).lat, lng: areaById(mapPlace.id).lng };
 
   if (!ready) {
     return <View style={[s.root, { alignItems: 'center', justifyContent: 'center' }]}><ActivityIndicator color={c.amber} /></View>;
@@ -251,10 +297,20 @@ function Main() {
 
       <AreaPicker {...props} visible={picker !== null} onClose={() => setPicker(null)}
         onPick={(a) => {
-          if (picker === 'main') { update({ areaId: a.id, gps: false }); setMyReport(null); }
-          else { const saved = st.saved.map((p, i) => (i === picker ? { ...p, id: a.id } : p)); update({ saved }); }
+          if (picker === 'main') { update({ areaId: a.id, gps: false, sel: null }); setMyReport(null); }
+          else { const saved = st.saved.map((p, i) => (i === picker ? { ...p, id: a.id, cell: null } : p)); update({ saved }); }
           setPicker(null);
         }} />
+
+      {mapStart && (
+        <MapPicker s={s} c={c} t={t} start={mapStart}
+          onClose={() => { setMapFor(null); setAfterPin(false); }}
+          onPick={(pos) => {
+            savePin(mapFor, pos.lat, pos.lng);
+            if (afterPin) { setAfterPin(false); askNotificationPermission(); update({ sensor: true }); }
+            setMapFor(null);
+          }} />
+      )}
     </View>
   );
 }
@@ -263,8 +319,8 @@ function Main() {
 function Card({ s, children, style }) { return <View style={[s.card, style]}>{children}</View>; }
 function Eyebrow({ s, children }) { return <Text style={s.eyebrow}>{children}</Text>; }
 
-function AreaButton({ s, t, c, area, areaName, utilName, st, detecting, onPress }) {
-  const label = detecting ? t.detecting : st.gps ? t.autoLbl : t.yourArea;
+function AreaButton({ s, t, c, area, areaName, utilName, st, zone, detecting, onPress }) {
+  const label = detecting ? t.detecting : zone ? t.streetLbl : st.gps ? t.autoLbl : t.yourArea;
   return (
     <Pressable style={s.areaBtn} onPress={onPress}>
       <Ionicons name="location-outline" size={20} color={c.ink2} />
@@ -357,9 +413,9 @@ function Home(p) {
           </View>
         </Pressable>
         {st.saved.map((pl, i) => {
-          const on = !st.gps && st.areaId === pl.id;
+          const on = !st.gps && st.sel === i;
           return (
-            <Pressable key={i} onPress={() => { p.update({ areaId: pl.id, gps: false }); p.setMyReport(null); }}
+            <Pressable key={i} onPress={() => { p.update({ areaId: pl.id, gps: false, sel: i }); p.setMyReport(null); }}
               style={[s.chip, on && { backgroundColor: c.ink, borderColor: c.ink }]}>
               <Text style={[s.chipTxt, on && { color: c.bg }]}>{t[pl.label]} · {areaName(areaById(pl.id))}</Text>
             </Pressable>
@@ -381,6 +437,17 @@ function Home(p) {
           ))}
         </View>
       </View>
+
+      {sensorAvailable && !st.sensor && (
+        <Pressable onPress={() => p.enableSensor(true)} style={[s.card, { flexDirection: 'row', alignItems: 'center', gap: 12 }]}>
+          <Ionicons name="pulse" size={22} color={c.amberInk} />
+          <View style={{ flex: 1 }}>
+            <Text style={s.k}>{t.sensorCard}</Text>
+            <Text style={s.small} numberOfLines={3}>{t.sensorH}</Text>
+          </View>
+          <Text style={{ color: c.amberInk, fontWeight: '800' }}>{t.sensorOnBtn}</Text>
+        </Pressable>
+      )}
 
       <Card s={s}>
         <Eyebrow s={s}>{t.nextOutage}</Eyebrow>
@@ -575,6 +642,12 @@ function Settings(p) {
           <View style={{ flex: 1 }}><Text style={s.k}>{t.liveSet}</Text><Text style={s.small}>{t.liveSetH}</Text></View>
           <Switch value={st.live !== false} onValueChange={(v) => update({ live: v })} trackColor={{ true: c.on }} />
         </View>
+        {sensorAvailable && (
+          <View style={s.setRow}>
+            <View style={{ flex: 1 }}><Text style={s.k}>{t.sensorT}</Text><Text style={s.small}>{t.sensorH}</Text></View>
+            <Switch value={!!st.sensor} onValueChange={p.enableSensor} trackColor={{ true: c.on }} />
+          </View>
+        )}
         <View style={s.setRow}>
           <View style={{ flex: 1 }}><Text style={s.k}>{t.autoSet}</Text><Text style={s.small}>{t.autoSetH}</Text></View>
           <Switch value={st.auto} onValueChange={(v) => { update({ auto: v }); if (v) p.detect(); }} trackColor={{ true: c.on }} />
@@ -586,7 +659,12 @@ function Settings(p) {
         <Eyebrow s={s}>{t.saved}</Eyebrow>
         {st.saved.map((pl, i) => (
           <View key={i} style={s.setRow}>
-            <View style={{ flex: 1 }}><Text style={s.k}>{t[pl.label]}</Text><Text style={s.small}>{areaName(areaById(pl.id))}</Text></View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.k}>{t[pl.label]}</Text>
+              <Text style={s.small}>{pl.cell ? `${t.pinned} · ` : ''}{areaName(areaById(pl.id))}</Text>
+            </View>
+            <Pressable onPress={() => p.pinHere(i)} style={s.ghostSm}><Ionicons name="navigate" size={16} color={c.ink} /></Pressable>
+            <Pressable onPress={() => p.setMapFor(i)} style={s.ghostSm}><Ionicons name="map-outline" size={16} color={c.ink} /></Pressable>
             <Pressable onPress={() => p.setPicker(i)} style={s.ghostSm}><Text style={{ color: c.ink, fontWeight: '700' }}>{t.change}</Text></Pressable>
           </View>
         ))}
