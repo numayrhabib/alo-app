@@ -11,10 +11,14 @@ const TEXT = {
   en: {
     out: (a: string, n: number) => [`Power is out in ${a}`, `${n} neighbours just reported load shedding. Tap to see live status.`],
     back: (a: string, n: number) => [`Power is back in ${a}`, `${n} neighbours say electricity has returned.`],
+    zoneOut: (a: string, n: number) => [`Power cut on your street`, `${n} phones nearby just lost power (near ${a}).`],
+    zoneBack: (a: string, n: number) => [`Power is back on your street`, `${n} phones nearby say electricity is back (near ${a}).`],
   },
   bn: {
     out: (a: string, n: number) => [`${a}-এ বিদ্যুৎ নেই`, `${toBn(n)} জন প্রতিবেশী এইমাত্র লোডশেডিং জানিয়েছেন।`],
     back: (a: string, n: number) => [`${a}-এ বিদ্যুৎ এসেছে`, `${toBn(n)} জন প্রতিবেশী জানিয়েছেন বিদ্যুৎ ফিরেছে।`],
+    zoneOut: (a: string, n: number) => [`আপনার আশেপাশে বিদ্যুৎ গেছে`, `${a}-এর কাছে ${toBn(n)}টি ফোনে এইমাত্র বিদ্যুৎ চলে গেছে।`],
+    zoneBack: (a: string, n: number) => [`আপনার আশেপাশে বিদ্যুৎ ফিরেছে`, `${a}-এর কাছে ${toBn(n)}টি ফোন জানিয়েছে বিদ্যুৎ ফিরেছে।`],
   },
 };
 function toBn(n: number) {
@@ -57,8 +61,22 @@ Deno.serve(async (req) => {
     if (!alert) return new Response(JSON.stringify({ skipped: true }), { status: 200 });
 
     const since = new Date(Date.now() - 60 * 86400000).toISOString();
-    const { data: subs } = await sb.from("push_tokens").select("token, lang")
-      .contains("areas", [alert.area_id]).gt("updated_at", since).limit(5000);
+    // Street zone: everyone following the 3x3 squares around it, plus squares learned to share its line.
+    let q = sb.from("push_tokens").select("token, lang, last_sent_at, last_kind").gt("updated_at", since).limit(5000);
+    const zone = alert.gi != null && alert.gj != null;
+    if (zone) {
+      const cells: string[] = [];
+      for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) cells.push(`${alert.gi + di}:${alert.gj + dj}`);
+      const { data: links } = await sb.from("cell_links").select("b").eq("a", `${alert.gi}:${alert.gj}`).limit(200);
+      for (const l of links ?? []) cells.push(l.b);
+      q = q.overlaps("cells", cells);
+    } else {
+      q = q.contains("areas", [alert.area_id]);
+    }
+    const { data: all } = await q;
+    // one notification per phone per outage, even if neighbouring squares both raise an alert
+    const recent = Date.now() - 30 * 60000;
+    const subs = (all ?? []).filter((s) => !(s.last_kind === alert.kind && s.last_sent_at && new Date(s.last_sent_at).getTime() > recent));
     if (!subs || !subs.length) return new Response(JSON.stringify({ sent: 0 }), { status: 200 });
 
     const sa = JSON.parse(Deno.env.get("FCM_SERVICE_ACCOUNT") ?? "{}");
@@ -66,9 +84,11 @@ Deno.serve(async (req) => {
     const names = AREAS[alert.area_id] ?? [alert.area_id, alert.area_id];
     let sent = 0;
     const dead: string[] = [];
+    const delivered: string[] = [];
     for (const s of subs) {
       const lang = s.lang === "en" ? "en" : "bn";
-      const [title, body] = TEXT[lang][alert.kind as "out" | "back"](lang === "en" ? names[0] : names[1], alert.phones);
+      const key = (zone ? (alert.kind === "out" ? "zoneOut" : "zoneBack") : alert.kind) as "out" | "back" | "zoneOut" | "zoneBack";
+      const [title, body] = TEXT[lang][key](lang === "en" ? names[0] : names[1], alert.phones);
       const r = await fetch(`https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`, {
         method: "POST",
         headers: { Authorization: `Bearer ${access}`, "Content-Type": "application/json" },
@@ -81,10 +101,13 @@ Deno.serve(async (req) => {
           },
         }),
       });
-      if (r.ok) sent++;
+      if (r.ok) { sent++; delivered.push(s.token); }
       else if (r.status === 404 || r.status === 400) dead.push(s.token);
     }
     if (dead.length) await sb.from("push_tokens").delete().in("token", dead);
+    if (delivered.length) {
+      await sb.from("push_tokens").update({ last_sent_at: new Date().toISOString(), last_kind: alert.kind }).in("token", delivered);
+    }
     await sb.from("alerts").update({ sent_count: sent }).eq("id", alert.id);
     return new Response(JSON.stringify({ sent, removed: dead.length }), { status: 200 });
   } catch (e) {
